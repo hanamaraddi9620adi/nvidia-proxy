@@ -51,7 +51,7 @@ Anthropic blocks. There are tests for exactly that.
 Needs **Node 20+**. It has **zero runtime dependencies**.
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/nvidia-proxy.git
+git clone https://github.com/hanamaraddi9620adi/nvidia-proxy.git
 cd nvidia-proxy
 npm install
 npm install -g .
