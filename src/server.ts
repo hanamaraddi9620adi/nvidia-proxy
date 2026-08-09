@@ -14,9 +14,13 @@
 import http from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 
+import fs from 'node:fs';
+
 import {
+  CONFIG_FILE,
   activeProfile,
   clearServerRecord,
+  loadConfig,
   resolveApiKey,
   writeServerRecord,
   type Config,
@@ -38,6 +42,13 @@ export interface ServerOptions {
   config: Config;
   /** Print one line per request. */
   verbose?: boolean;
+  /**
+   * Re-read ~/.nvproxy/config.json when it changes, so `nvp use` takes effect
+   * without a restart. The CLI turns this on; it defaults to off so that a
+   * caller passing an explicit config - a test, most importantly - always gets
+   * exactly that config and can never accidentally reach the real API.
+   */
+  reloadFromDisk?: boolean;
 }
 
 // ---------------------------------------------------------------------------
@@ -274,11 +285,33 @@ function log(message: string): void {
 // ---------------------------------------------------------------------------
 
 export function createServer(options: ServerOptions): http.Server {
-  const { config, verbose = false } = options;
+  const { verbose = false, reloadFromDisk = false } = options;
+
+  // When enabled, the config is reloaded whenever the file on disk changes, so
+  // `nvp use` takes effect on the very next request without restarting the
+  // proxy. The mtime check keeps this to one stat() per request rather than a
+  // full parse.
+  let cached: Config = options.config;
+  let cachedMtime = 0;
+
+  const currentConfig = (): Config => {
+    if (!reloadFromDisk) return cached;
+    try {
+      const mtime = fs.statSync(CONFIG_FILE).mtimeMs;
+      if (mtime !== cachedMtime) {
+        cached = loadConfig();
+        cachedMtime = mtime;
+      }
+    } catch {
+      // No file on disk (tests pass a config in directly): keep what we have.
+    }
+    return cached;
+  };
 
   return http.createServer((req, res) => {
     void (async () => {
       const url = (req.url ?? '/').split('?')[0] ?? '/';
+      const config = currentConfig();
 
       try {
         // Health check, used by the launchers to tell whether the port is ours.
@@ -294,8 +327,6 @@ export function createServer(options: ServerOptions): http.Server {
           return;
         }
 
-        // Re-read the key and profile per request so `nvp use` takes effect
-        // without restarting the server.
         const apiKey = resolveApiKey(config);
         if (!apiKey) {
           sendError(res, 401, 'No NVIDIA API key is configured. Run `nvp key set`.');
@@ -328,7 +359,8 @@ export function createServer(options: ServerOptions): http.Server {
 
 /** Starts the server and resolves once it is accepting connections. */
 export function startServer(options: ServerOptions & { port: number }): Promise<http.Server> {
-  const server = createServer(options);
+  // The CLI is the one caller that should follow the file on disk.
+  const server = createServer({ reloadFromDisk: true, ...options });
 
   return new Promise((resolve, reject) => {
     server.once('error', (error: NodeJS.ErrnoException) => {

@@ -22,12 +22,23 @@ import {
   looksLikeNvidiaKey,
   maskKey,
   readServerRecord,
+  readUsableModels,
+  rememberUsable,
   resolveApiKey,
   saveConfig,
+  writeUsableModels,
   type Config,
   type Profile,
 } from './config.js';
-import { NvidiaError, listModels, suggestDefaults, validateKey, type ClientOptions } from './nvidia.js';
+import {
+  NvidiaError,
+  listModels,
+  probeMany,
+  probeModel,
+  suggestDefaults,
+  validateKey,
+  type ClientOptions,
+} from './nvidia.js';
 import { isOurServerRunning, startServer, stopServer } from './server.js';
 import {
   CODEX_PROFILE_ID,
@@ -89,8 +100,9 @@ function printHelp(): void {
     nvp chat ${c.grey('[--model id]')}    talk to the model in this terminal
 
   ${c.bold('Models')}
-    nvp models ${c.grey('[--refresh]')}   list every model your key can reach
+    nvp models ${c.grey('[--refresh]')}   list NVIDIA's catalogue
     nvp models ${c.grey('<search>')}      filter that list
+    nvp models --check         call each one to find which your key may use
     nvp use ${c.grey('[id]')}             choose the main model (no id = pick from a menu)
     nvp use --small ${c.grey('<id>')}     choose the cheap background model
 
@@ -139,14 +151,73 @@ async function fetchCatalogue(config: Config, force: boolean): Promise<string[] 
 }
 
 function modelChoices(models: string[]): Choice<string>[] {
-  return models.map((id) => {
+  // Anything already proven to answer is flagged, and sorted to the top, so
+  // the menu steers you towards models you can actually use.
+  const usable = new Set(readUsableModels()?.usable ?? []);
+
+  const decorate = (id: string): Choice<string> => {
     const slash = id.indexOf('/');
+    const publisher = slash > 0 ? id.slice(0, slash) : '';
     return {
       label: id,
-      hint: slash > 0 ? id.slice(0, slash) : '',
+      hint: usable.has(id) ? `${publisher}  verified` : publisher,
       value: id,
     };
-  });
+  };
+
+  if (usable.size === 0) return models.map(decorate);
+
+  const known = models.filter((m) => usable.has(m));
+  const rest = models.filter((m) => !usable.has(m));
+  return [...known, ...rest].map(decorate);
+}
+
+/**
+ * Calls a model once before we commit to it.
+ *
+ * NVIDIA's catalogue lists models your key cannot invoke, so a pick is not
+ * trustworthy until it has actually answered. This is the guard that stops a
+ * broken model reaching Claude Code, where the failure surfaces as the far
+ * more confusing "model may not exist or you may not have access to it".
+ */
+async function verifyPick(config: Config, model: string): Promise<boolean> {
+  const spin = spinner(`Checking that ${model} answers...`);
+  const result = await probeModel(clientFor(config), model);
+  spin.stop();
+
+  if (result.ok) {
+    rememberUsable(model);
+    ok(`${colour.nvidia(model)} works.`);
+    return true;
+  }
+
+  if (result.transient) {
+    warn(`${model}: ${result.reason}`);
+    say(colour.grey('  The model itself looks fine. Keeping it.'));
+    return true;
+  }
+
+  fail(`${model}: ${result.reason}`);
+  if (result.noAccess) {
+    say(colour.grey('  NVIDIA lists this model publicly, but your key cannot call it.'));
+    say(colour.grey('  This is normal on the free tier. Pick a different one.'));
+  }
+  return false;
+}
+
+/** Shows the picker until the chosen model actually answers, or you cancel. */
+async function pickVerified(
+  config: Config,
+  models: string[],
+  title: string,
+): Promise<string | null> {
+  for (;;) {
+    const chosen = await select(title, modelChoices(models));
+    if (!chosen) return null;
+    if (await verifyPick(config, chosen)) return chosen;
+    say('');
+    if (!(await confirm('  Choose a different model?', true))) return null;
+  }
 }
 
 function updateProfile(config: Config, change: Partial<Profile>): void {
@@ -210,13 +281,12 @@ async function commandSetup(config: Config): Promise<number> {
   saveConfig(config);
 
   // ---- 2. the models -----------------------------------------------------
-  const suggested = suggestDefaults(models);
+  say('');
+  say(colour.grey('  Note: NVIDIA lists models your key may not be allowed to call.'));
+  say(colour.grey('  Each pick is tested before it is saved, so nothing broken gets through.'));
   say('');
 
-  const big = await select(
-    `  Main model  ${colour.grey('(does the real work)')}`,
-    modelChoices(models),
-  );
+  const big = await pickVerified(config, models, `  Main model  ${colour.grey('(does the real work)')}`);
   if (!big) {
     warn('Cancelled. The key was saved; run `nvp use` when you are ready.');
     return 1;
@@ -225,9 +295,10 @@ async function commandSetup(config: Config): Promise<number> {
   say('');
   say(`  ${colour.grey('Background model: used for small chores like summarising.')}`);
   say(`  ${colour.grey('A smaller, faster model here keeps the agent responsive.')}`);
-  const small = await select(
-    `  Background model  ${colour.grey(`(suggested: ${suggested.small || big})`)}`,
-    modelChoices(models),
+  const small = await pickVerified(
+    config,
+    models,
+    `  Background model  ${colour.grey('(small and fast)')}`,
   );
 
   updateProfile(config, { big, small: small ?? big });
@@ -314,6 +385,7 @@ async function commandKey(config: Config, args: string[]): Promise<number> {
 
 async function commandModels(config: Config, args: string[]): Promise<number> {
   const force = args.includes('--refresh');
+  const check = args.includes('--check');
   const search = args.find((a) => !a.startsWith('-'))?.toLowerCase();
 
   const models = await fetchCatalogue(config, force);
@@ -325,17 +397,60 @@ async function commandModels(config: Config, args: string[]): Promise<number> {
     return 1;
   }
 
+  if (check) return checkModels(config, filtered);
+
   const profile = activeProfile(config);
+  const usable = new Set(readUsableModels()?.usable ?? []);
+
   heading(`${filtered.length} model${filtered.length === 1 ? '' : 's'}`);
   for (const id of filtered) {
     const marks: string[] = [];
     if (id === profile.big) marks.push(colour.nvidia('main'));
     if (id === profile.small) marks.push(colour.cyan('background'));
+    if (usable.has(id)) marks.push(colour.green('verified'));
     say(`  ${id}${marks.length ? `  ${marks.join(' ')}` : ''}`);
   }
   say('');
+  if (usable.size === 0) {
+    say(colour.grey('  NVIDIA lists models your key may not be allowed to call.'));
+    say(colour.grey('  Find out which actually work:  nvp models --check'));
+  }
   say(colour.grey('  Choose one with:  nvp use <id>     or just  nvp use'));
   return 0;
+}
+
+/**
+ * Calls every listed model once and records which answer.
+ *
+ * Slow by necessity: the free tier allows about 40 requests a minute, so this
+ * paces itself. It is worth running once after setup, because the result makes
+ * every later menu accurate.
+ */
+async function checkModels(config: Config, models: string[]): Promise<number> {
+  heading(`Checking ${models.length} models`);
+  say(colour.grey('  One tiny request each, paced under the free-tier rate limit.'));
+  say(colour.grey(`  This takes roughly ${Math.ceil((models.length * 1.9) / 60)} minutes. Ctrl-C is safe.`));
+  say('');
+
+  const usable = await probeMany(clientFor(config), models, (model, result, done, total) => {
+    const counter = colour.grey(`${String(done).padStart(3)}/${total}`);
+    if (result.ok) {
+      say(`  ${counter}  ${colour.green('works')}     ${model}`);
+    } else if (result.noAccess) {
+      say(`  ${counter}  ${colour.grey('no access')} ${colour.grey(model)}`);
+    } else {
+      say(`  ${counter}  ${colour.yellow('skipped')}   ${colour.grey(`${model} (${result.reason})`)}`);
+    }
+  });
+
+  writeUsableModels(usable);
+
+  heading(`${usable.length} of ${models.length} are callable with your key`);
+  for (const model of usable) say(`  ${colour.nvidia(model)}`);
+  say('');
+  say(colour.grey('  These are now flagged "verified" and sorted first in every menu.'));
+  say(colour.grey('  Pick one with:  nvp use'));
+  return usable.length > 0 ? 0 : 1;
 }
 
 async function commandUse(config: Config, args: string[]): Promise<number> {
@@ -365,12 +480,15 @@ async function commandUse(config: Config, args: string[]): Promise<number> {
         return 1;
       }
     }
+    // A model named on the command line still has to prove it answers.
+    if (!(await verifyPick(config, chosen))) return 1;
   } else {
-    const picked = await select(
+    const picked = await pickVerified(
+      config,
+      models,
       wantsSmall
         ? `  Background model  ${colour.grey('(small, fast, for chores)')}`
         : `  Main model  ${colour.grey('(does the real work)')}`,
-      modelChoices(models),
     );
     if (!picked) return 0;
     chosen = picked;
@@ -732,25 +850,39 @@ async function commandDoctor(config: Config): Promise<number> {
       spin.stop();
       check('key accepted', true, `${count} models reachable`);
 
+      // Being listed in the catalogue proves nothing - the model has to be
+      // called. This is the check that would have caught the confusing
+      // "model may not exist" failure inside Claude Code.
       const profile = activeProfile(config);
-      const models = await listModels(clientFor(config), false);
-      check(
-        'main model',
-        Boolean(profile.big) && models.includes(profile.big),
-        profile.big
-          ? models.includes(profile.big)
-            ? profile.big
-            : `${profile.big} is not in the catalogue - run \`nvp use\``
-          : 'not set - run `nvp use`',
-      );
+
+      if (!profile.big) {
+        check('main model', false, 'not set - run `nvp use`');
+      } else {
+        const spinBig = spinner(`  Calling ${profile.big}...`);
+        const result = await probeModel(clientFor(config), profile.big);
+        spinBig.stop();
+        check(
+          'main model',
+          result.ok || result.transient,
+          result.ok
+            ? `${profile.big} answered`
+            : `${profile.big} - ${result.reason}${result.noAccess ? ' (run `nvp models --check`)' : ''}`,
+        );
+        if (result.ok) rememberUsable(profile.big);
+      }
+
       if (profile.small) {
+        const spinSmall = spinner(`  Calling ${profile.small}...`);
+        const result = await probeModel(clientFor(config), profile.small);
+        spinSmall.stop();
         check(
           'background model',
-          models.includes(profile.small),
-          models.includes(profile.small)
-            ? profile.small
-            : `${profile.small} is not in the catalogue - run \`nvp use --small\``,
+          result.ok || result.transient,
+          result.ok
+            ? `${profile.small} answered`
+            : `${profile.small} - ${result.reason}${result.noAccess ? ' (run `nvp use --small`)' : ''}`,
         );
+        if (result.ok) rememberUsable(profile.small);
       }
     } catch (error) {
       spin.stop();

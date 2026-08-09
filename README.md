@@ -153,6 +153,54 @@ Neither file has your key written into it. Both reference `NVIDIA_API_KEY`, whic
 
 ---
 
+## The catalogue lies — read this one
+
+**`GET /v1/models` returns models your key cannot call.** This is the single most
+confusing thing about NVIDIA's free tier, and it costs people hours.
+
+Ask for one of them and you get:
+
+```
+404  Function '23d4f03a-…': Not found for account 'ZtON57-…'
+```
+
+which reads like the model doesn't exist. It does exist — you just have no access to
+it. Inside Claude Code the same failure surfaces as the far vaguer *"There's an issue
+with the selected model. It may not exist or you may not have access to it."*
+
+On one real free-tier key, **only 20 of 43 popular models were actually callable**.
+Everything Kimi, everything Qwen3-Coder, everything GLM, DeepSeek V3.x and
+Nemotron Ultra were all listed but all refused.
+
+`nvp` handles this for you:
+
+- **Every model you pick is called once before it's saved.** A model that won't answer
+  never reaches your agent — `nvp use` refuses it and offers the menu again.
+- **`nvp models --check`** calls each model in the catalogue and records which ones
+  answer. They're then flagged `verified` and sorted to the top of every menu.
+- **`nvp doctor`** invokes your configured models rather than just checking they're
+  listed.
+
+```bash
+nvp models --check    # ~3 minutes, paced under the rate limit; worth doing once
+```
+
+### Models that worked on a free key (Feb 2026)
+
+Verify with `--check` rather than trusting this list; access varies per account.
+
+| Model | Good for |
+|---|---|
+| `openai/gpt-oss-120b` | **best default** — correct tool calls in ~1s |
+| `openai/gpt-oss-20b` | background slot |
+| `nvidia/nemotron-3-super-120b-a12b` | strong, ~5s |
+| `deepseek-ai/deepseek-v4-flash-0731` | ~11s |
+| `nvidia/llama-3.3-nemotron-super-49b-v1.5` | ~15s |
+| `meta/llama-3.3-70b-instruct` | general |
+| `nvidia/nvidia-nemotron-nano-9b-v2` | small and quick |
+
+---
+
 ## Notes worth knowing
 
 **The free tier is rate limited** to roughly 40 requests a minute. Coding agents are

@@ -188,6 +188,131 @@ export async function validateKey(opts: ClientOptions): Promise<number> {
   return models.length;
 }
 
+export interface ProbeResult {
+  ok: boolean;
+  status: number;
+  /** Short human-readable reason when ok is false. */
+  reason: string;
+  /** True when the model exists but this account may not invoke it. */
+  noAccess: boolean;
+  /** True when the model is fine but was momentarily busy or rate limited. */
+  transient: boolean;
+}
+
+/**
+ * Actually calls a model with a one-token request.
+ *
+ * This exists because of a genuinely surprising NVIDIA behaviour: GET /models
+ * returns the whole public catalogue, including models your account cannot
+ * invoke. Asking for one of those returns
+ *
+ *   404 "Function '<uuid>': Not found for account '<id>'"
+ *
+ * which reads like the model does not exist, when it means you lack access to
+ * it. Listing a model is therefore not evidence you can use it, and the only
+ * reliable test is to call it. Every place that lets you choose a model runs
+ * this first.
+ */
+export async function probeModel(opts: ClientOptions, model: string): Promise<ProbeResult> {
+  try {
+    const response = await fetch(`${opts.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${opts.apiKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'hi' }],
+        max_tokens: 1,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(45_000),
+    });
+
+    if (response.ok) {
+      return { ok: true, status: 200, reason: '', noAccess: false, transient: false };
+    }
+
+    const body = await response.text().catch(() => '');
+
+    // The account-scoped 404 described above.
+    if (response.status === 404) {
+      return {
+        ok: false,
+        status: 404,
+        reason: 'your key has no access to this model',
+        noAccess: true,
+        transient: false,
+      };
+    }
+
+    // Busy or throttled: the model is fine, the moment is not.
+    if (response.status === 429 || response.status === 503 || response.status === 504) {
+      return {
+        ok: false,
+        status: response.status,
+        reason:
+          response.status === 429
+            ? 'rate limited, try again shortly'
+            : 'model is busy right now',
+        noAccess: false,
+        transient: true,
+      };
+    }
+
+    // A 400 usually means the model is reachable but wants a different request
+    // shape (an embedding or parsing model, say). Reachable, but not for chat.
+    if (response.status === 400) {
+      return {
+        ok: false,
+        status: 400,
+        reason: 'not a chat model',
+        noAccess: false,
+        transient: false,
+      };
+    }
+
+    return {
+      ok: false,
+      status: response.status,
+      reason: `HTTP ${response.status} ${body.slice(0, 120)}`.trim(),
+      noAccess: false,
+      transient: false,
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      reason: `could not reach NVIDIA (${(error as Error).message})`,
+      noAccess: false,
+      transient: true,
+    };
+  }
+}
+
+/**
+ * Probes many models, paced to stay under the free tier's ~40 requests per
+ * minute. `onResult` is called as each finishes so the caller can show
+ * progress rather than sitting silent for minutes.
+ */
+export async function probeMany(
+  opts: ClientOptions,
+  models: string[],
+  onResult: (model: string, result: ProbeResult, done: number, total: number) => void,
+): Promise<string[]> {
+  const usable: string[] = [];
+  for (let i = 0; i < models.length; i++) {
+    const model = models[i]!;
+    const result = await probeModel(opts, model);
+    if (result.ok) usable.push(model);
+    onResult(model, result, i + 1, models.length);
+    // ~35 requests a minute, comfortably inside the limit.
+    if (i < models.length - 1) await new Promise((r) => setTimeout(r, 1700));
+  }
+  return usable;
+}
+
 // ---------------------------------------------------------------------------
 // Chat completions
 // ---------------------------------------------------------------------------

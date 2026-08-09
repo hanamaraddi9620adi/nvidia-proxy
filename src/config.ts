@@ -19,6 +19,7 @@ import os from 'node:os';
 export const CONFIG_DIR = path.join(os.homedir(), '.nvproxy');
 export const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 export const CACHE_FILE = path.join(CONFIG_DIR, 'models.json');
+export const USABLE_FILE = path.join(CONFIG_DIR, 'usable.json');
 export const SERVER_FILE = path.join(CONFIG_DIR, 'server.json');
 
 export const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1';
@@ -197,6 +198,50 @@ export function writeCatalogueCache(models: string[]): void {
   } catch {
     // A cache that cannot be written is a slow tool, not a broken one.
   }
+}
+
+// ---------------------------------------------------------------------------
+// Verified-usable models
+// ---------------------------------------------------------------------------
+
+/**
+ * The models this key has actually been observed to answer.
+ *
+ * Kept separate from the catalogue cache because the two mean different
+ * things: the catalogue is what NVIDIA publishes, this is what your account
+ * may invoke. They are not the same list, which is the single most confusing
+ * thing about the free tier.
+ */
+export interface UsableRecord {
+  checkedAt: number;
+  usable: string[];
+}
+
+export function readUsableModels(): UsableRecord | null {
+  try {
+    const record = JSON.parse(fs.readFileSync(USABLE_FILE, 'utf8')) as UsableRecord;
+    return Array.isArray(record.usable) ? record : null;
+  } catch {
+    return null;
+  }
+}
+
+export function writeUsableModels(usable: string[]): void {
+  ensureDir();
+  try {
+    const payload: UsableRecord = { checkedAt: Date.now(), usable };
+    fs.writeFileSync(USABLE_FILE, JSON.stringify(payload, null, 2) + '\n', { mode: 0o600 });
+  } catch {
+    // Advisory only.
+  }
+}
+
+/** Records a single model as confirmed working, without a full sweep. */
+export function rememberUsable(model: string): void {
+  const record = readUsableModels();
+  const usable = new Set(record?.usable ?? []);
+  usable.add(model);
+  writeUsableModels([...usable]);
 }
 
 // ---------------------------------------------------------------------------
