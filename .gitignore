@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Never commit secrets. The real config lives in ~/.nvproxy/config.json,
+# outside this repo, but guard against a stray copy landing here.
+.env
+.env.*
+!.env.example
+config.json
+*.key
+nvproxy.log

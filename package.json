@@ -1,0 +1,40 @@
+{
+  "name": "nvidia-proxy",
+  "version": "1.0.0",
+  "description": "Use NVIDIA's free open-weight models (Kimi, Nemotron, Qwen3-Coder, DeepSeek, GLM) inside Claude Code, Codex, OpenCode, or your terminal. Configure once, never reconnect.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "bin": {
+    "nvp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "start": "node dist/cli.js",
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "nvidia",
+    "nim",
+    "claude-code",
+    "codex",
+    "opencode",
+    "proxy",
+    "anthropic",
+    "llm"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}
